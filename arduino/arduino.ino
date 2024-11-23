@@ -6,7 +6,7 @@
 #define RST_PIN 9
 #define SS_PIN 10
 
-// Configuração do ESP-01
+// Configuração porta serial do ESP-01
 SoftwareSerial espSerial(2, 3); // RX, TX
 
 MFRC522 rfid(SS_PIN, RST_PIN);
