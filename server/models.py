@@ -10,6 +10,7 @@ class Aluno(Base):
     nome = Column(String, index=True)
     matricula = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
+    rfid = Column(String, unique=True, index=True)  # Adiciona o campo RFID
 
     # Relacionamento: Um aluno pode ter várias frequências
     frequencias = relationship("Frequencia", back_populates="aluno")

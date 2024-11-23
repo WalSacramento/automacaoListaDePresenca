@@ -4,11 +4,22 @@ from database import SessionLocal, engine
 from models import Base, Aluno, Turma, Frequencia
 from typing import List
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from datetime import date
 
 # Cria as tabelas no banco de dados (se não existirem)
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+# Configuração do CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite todas as origens, ajuste conforme necessário
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite todos os métodos HTTP
+    allow_headers=["*"],  # Permite todos os cabeçalhos
+)
 
 # Dependência para obter a sessão do banco de dados
 def get_db():
@@ -18,6 +29,9 @@ def get_db():
     finally:
         db.close()
 
+# Variável global para armazenar o ID do aluno que está aguardando a leitura do RFID
+aluno_aguardando_rfid = None
+
 # Modelo Pydantic para validar dados de entrada
 class AlunoBase(BaseModel):
     nome: str
@@ -26,6 +40,7 @@ class AlunoBase(BaseModel):
 
 class AlunoResponse(AlunoBase):
     id: int
+    rfid: str = None
 
     class Config:
         orm_mode = True
@@ -37,10 +52,12 @@ class AlunoResponse(AlunoBase):
 # 1. Criar um novo aluno
 @app.post("/alunos/", response_model=AlunoResponse, status_code=status.HTTP_201_CREATED)
 def create_aluno(aluno: AlunoBase, db: Session = Depends(get_db)):
+    global aluno_aguardando_rfid
     db_aluno = Aluno(nome=aluno.nome, matricula=aluno.matricula, email=aluno.email)
     db.add(db_aluno)
     db.commit()
     db.refresh(db_aluno)
+    aluno_aguardando_rfid = db_aluno.id  # Define o aluno que está aguardando a vinculação do RFID
     return db_aluno
 
 # 2. Listar todos os alunos
@@ -151,9 +168,11 @@ class FrequenciaBase(BaseModel):
     aluno_id: int
     turma_id: int
 
-class FrequenciaResponse(FrequenciaBase):
+class FrequenciaResponse(BaseModel):
     id: int
-
+    data: str
+    presente: bool
+    aluno: AlunoResponse 
     class Config:
         orm_mode = True
 
@@ -221,3 +240,78 @@ def read_frequencias_turma(turma_id: int, db: Session = Depends(get_db)):
 def read_frequencias_aluno_turma(aluno_id: int, turma_id: int, db: Session = Depends(get_db)):
     frequencias = db.query(Frequencia).filter(Frequencia.aluno_id == aluno_id, Frequencia.turma_id == turma_id).all()
     return frequencias 
+
+
+
+# --------------------
+# Rotas para funções do Arduino
+# --------------------
+class RFID(BaseModel):
+    rfid: str
+
+class RFIDResponse(BaseModel):
+    message: str
+
+
+# 1. Receber um código RFID e imprimir no console
+@app.get("/arduino/rfid/{rfid}", response_model=RFIDResponse)
+def read_rfid(rfid: str, db: Session = Depends(get_db)):
+    global aluno_aguardando_rfid
+    if aluno_aguardando_rfid is None:
+        db_aluno = db.query(Aluno).filter(Aluno.rfid == rfid).first()
+        if db_aluno is None:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        
+        db_turma = db.query(Turma).filter(Turma.id == 1).first()
+        if db_turma is None:
+            raise HTTPException(status_code=404, detail="Turma não encontrada")
+        
+        # Verifica se o aluno já possui uma frequência marcada na data atual
+        data_atual = date.today().strftime("%Y-%m-%d")
+        frequencia = db.query(Frequencia).filter(Frequencia.aluno_id == db_aluno.id, Frequencia.turma_id == db_turma.id, Frequencia.data == data_atual).first()
+        if frequencia is not None:
+            raise HTTPException(status_code=400, detail="Frequência já marcada para o aluno na data atual")
+        
+        db_frequencia = Frequencia(data=data_atual, presente=True, aluno_id=db_aluno.id, turma_id=db_turma.id)
+        db.add(db_frequencia)
+        db.commit()
+        db.refresh(db_frequencia)
+        
+        return {"message": "Frequência marcada com sucesso"}
+    
+    db_aluno = db.query(Aluno).filter(Aluno.id == aluno_aguardando_rfid).first()
+    if db_aluno is None:
+        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+    
+    db_aluno.rfid = rfid
+    db.commit()
+    db.refresh(db_aluno)
+    
+    # Limpa a variável global após a vinculação
+    aluno_aguardando_rfid = None
+    
+    return {"message": "RFID vinculado com sucesso"}
+
+
+@app.get("/arduino/frequencia/{turma_id}/{rfid}", response_model=RFIDResponse)
+def marcar_frequencia(turma_id: int, rfid: str, db: Session = Depends(get_db)):
+    db_aluno = db.query(Aluno).filter(Aluno.rfid == rfid).first()
+    if db_aluno is None:
+        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+    
+    db_turma = db.query(Turma).filter(Turma.id == turma_id).first()
+    if db_turma is None:
+        raise HTTPException(status_code=404, detail="Turma não encontrada")
+    
+    # Verifica se o aluno já possui uma frequência marcada na data atual
+    data_atual = date.today().strftime("%Y-%m-%d")
+    frequencia = db.query(Frequencia).filter(Frequencia.aluno_id == db_aluno.id, Frequencia.turma_id == db_turma.id, Frequencia.data == data_atual).first()
+    if frequencia is not None:
+        raise HTTPException(status_code=400, detail="Frequência já marcada para o aluno na data atual")
+    
+    db_frequencia = Frequencia(data=data_atual, presente=True, aluno_id=db_aluno.id, turma_id=db_turma.id)
+    db.add(db_frequencia)
+    db.commit()
+    db.refresh(db_frequencia)
+    
+    return {"message": "Frequência marcada com sucesso"}
